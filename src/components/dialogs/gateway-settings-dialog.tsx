@@ -19,6 +19,7 @@ import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/lib/store";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { testConnection, gatewayRpc } from "@/lib/runtime";
+import { formatGatewayConfigPayload } from "@/lib/openclaw-config";
 import { cn } from "@/lib/utils";
 import {
   Building, Wifi, Wrench, Trash2, ChevronRight, RefreshCw,
@@ -111,23 +112,10 @@ export function GatewaySettingsDialog({
       gatewayRpc(gatewayUrl, gatewayToken, "config.get")
         .then((result) => {
           if (!result.ok) throw new Error(result.error?.message || "Failed");
-          setConfigHash((result.payload?.hash as string) || "");
-          const raw = result.payload?.raw as string | undefined;
-          if (raw) {
-            try {
-              const parsed = JSON.parse(raw);
-              const formatted = JSON.stringify(parsed, null, 2);
-              setConfigContent(formatted);
-              setConfigOriginal(formatted);
-            } catch {
-              setConfigContent(raw);
-              setConfigOriginal(raw);
-            }
-          } else {
-            const formatted = JSON.stringify(result.payload, null, 2);
-            setConfigContent(formatted);
-            setConfigOriginal(formatted);
-          }
+          const formatted = formatGatewayConfigPayload(result.payload);
+          setConfigHash(formatted.hash);
+          setConfigContent(formatted.content);
+          setConfigOriginal(formatted.content);
         })
         .catch((e) => setConfigError(`Failed to load config: ${e.message || e}`))
         .finally(() => setLoadingConfig(false));
@@ -135,8 +123,6 @@ export function GatewaySettingsDialog({
   }, [activeSection, configContent, gatewayUrl, gatewayToken]);
 
   if (!company) return null;
-
-  const isConnected = state.connectionStatus === "connected";
 
   async function handleTest() {
     if (!gatewayUrl || !gatewayToken) return;
@@ -226,6 +212,9 @@ export function GatewaySettingsDialog({
         setConfigError(`Failed to save: ${result.error?.message || "Unknown error"}`);
       } else {
         const formatted = JSON.stringify(parsed, null, 2);
+        if (typeof result.payload?.hash === "string") {
+          setConfigHash(result.payload.hash);
+        }
         setConfigContent(formatted);
         setConfigOriginal(formatted);
       }
@@ -243,16 +232,10 @@ export function GatewaySettingsDialog({
     try {
       const result = await gatewayRpc(gatewayUrl, gatewayToken, "config.get");
       if (!result.ok) throw new Error(result.error?.message || "Failed");
-      setConfigHash((result.payload?.hash as string) || "");
-      const raw = result.payload?.raw as string | undefined;
-      let formatted: string;
-      if (raw) {
-        try { formatted = JSON.stringify(JSON.parse(raw), null, 2); } catch { formatted = raw; }
-      } else {
-        formatted = JSON.stringify(result.payload, null, 2);
-      }
-      setConfigContent(formatted);
-      setConfigOriginal(formatted);
+      const formatted = formatGatewayConfigPayload(result.payload);
+      setConfigHash(formatted.hash);
+      setConfigContent(formatted.content);
+      setConfigOriginal(formatted.content);
     } catch (e) {
       setConfigError(`Failed to load config: ${e}`);
     } finally {
@@ -348,7 +331,14 @@ export function GatewaySettingsDialog({
             </div>
 
             {/* Scrollable content */}
-            <div className="flex-1 overflow-y-auto px-6 py-5">
+            <div
+              className={cn(
+                "flex-1 min-h-0",
+                activeSection === "config"
+                  ? "flex flex-col overflow-hidden px-6 py-5"
+                  : "overflow-y-auto px-6 py-5"
+              )}
+            >
               {activeSection === "general" && (
                 <div className="space-y-5">
                   <AvatarPicker
@@ -450,7 +440,7 @@ export function GatewaySettingsDialog({
               )}
 
               {activeSection === "config" && (
-                <div className="flex flex-col h-full">
+                <div className="flex flex-1 min-h-0 flex-col">
                   <div className="mb-2">
                     <Label>openclaw.json</Label>
                   </div>
@@ -464,7 +454,7 @@ export function GatewaySettingsDialog({
                         value={configContent}
                         onChange={(e) => { setConfigContent(e.target.value); setConfigError(""); }}
                         spellCheck={false}
-                        className="flex-1 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none focus:ring-1 focus:ring-primary/30 overflow-auto whitespace-pre"
+                        className="flex-1 min-h-0 w-full rounded-md border bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none focus:ring-1 focus:ring-primary/30 overflow-auto whitespace-pre"
                         style={{ minHeight: 200, resize: "none", tabSize: 2 }}
                       />
                       {configError && (

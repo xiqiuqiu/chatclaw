@@ -57,11 +57,25 @@ export async function connectGatewayWs(opts: WsRpcOptions): Promise<{
     }, timeout);
 
     const ws = new WebSocket(wsUrl);
-    const pending = new Map<string, { resolve: (f: WsFrame) => void; reject: (e: Error) => void }>();
+    const pending = new Map<string, { method: string; resolve: (f: WsFrame) => void; reject: (e: Error) => void }>();
+
+    function rejectPending(buildError: (method: string) => Error) {
+      for (const [id, handlers] of pending.entries()) {
+        pending.delete(id);
+        handlers.reject(buildError(handlers.method));
+      }
+    }
 
     ws.onerror = () => {
       clearTimeout(timer);
+      rejectPending(() => new Error("WebSocket connection failed"));
       reject(new Error("WebSocket connection failed"));
+    };
+
+    ws.onclose = () => {
+      clearTimeout(timer);
+      if (pending.size === 0) return;
+      rejectPending((method) => new Error(`WebSocket closed before response: ${method}`));
     };
 
     ws.onmessage = (event) => {
@@ -77,6 +91,7 @@ export async function connectGatewayWs(opts: WsRpcOptions): Promise<{
         const connectId = crypto.randomUUID();
 
         pending.set(connectId, {
+          method: "connect",
           resolve: (f) => {
             clearTimeout(timer);
             if (!f.ok) {
@@ -88,7 +103,16 @@ export async function connectGatewayWs(opts: WsRpcOptions): Promise<{
               call: (method, params) => {
                 return new Promise((res, rej) => {
                   const id = crypto.randomUUID();
-                  pending.set(id, { resolve: res, reject: rej });
+                  pending.set(id, {
+                    method,
+                    resolve: res,
+                    reject: (error) => {
+                      if (pending.has(id)) {
+                        pending.delete(id);
+                      }
+                      rej(error);
+                    },
+                  });
                   ws.send(JSON.stringify({ type: "req", id, method, params }));
                   setTimeout(() => {
                     if (pending.has(id)) {
