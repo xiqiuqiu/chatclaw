@@ -31,6 +31,7 @@ import {
   getMessagesByConversation,
 } from "@/lib/db";
 import { RuntimeClient } from "@/lib/runtime";
+import { buildAgentSyncPlan, type GatewayAgentSummary } from "@/lib/agent-sync";
 import type {
   Company,
   Agent,
@@ -519,6 +520,61 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: "REMOVE_COMPANY", id });
   }, [disconnectGateway]);
 
+  const syncCompanyAgentsWithGateway = useCallback(async (company: Company) => {
+    if (!company.gatewayUrl || !company.gatewayToken || company.runtimeType !== "openclaw") {
+      return;
+    }
+
+    const res = await fetch("/api/agents/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gatewayUrl: company.gatewayUrl,
+        gatewayToken: company.gatewayToken,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !Array.isArray(data.agents)) {
+      return;
+    }
+
+    const localAgents = await getAgentsByCompany(company.id);
+    const plan = buildAgentSyncPlan({
+      companyId: company.id,
+      localAgents,
+      remoteAgents: data.agents as GatewayAgentSummary[],
+    });
+
+    for (const staleAgentId of plan.staleAgentIds) {
+      await dbDeleteAgent(staleAgentId);
+    }
+
+    for (const agent of plan.agentsToCreate) {
+      await dbCreateAgent(agent);
+    }
+
+    const [agents, teams] = await Promise.all([
+      getAgentsByCompany(company.id),
+      getTeamsByCompany(company.id),
+    ]);
+    const current = stateRef.current;
+
+    if (current.activeCompanyId === company.id) {
+      dispatch({ type: "SET_AGENTS", agents });
+      dispatch({ type: "SET_TEAMS", teams });
+
+      if (
+        current.activeChatTarget?.type === "agent" &&
+        plan.staleAgentIds.includes(current.activeChatTarget.id)
+      ) {
+        dispatch({ type: "SET_CHAT_TARGET", target: null });
+        dispatch({ type: "SET_CONVERSATIONS", conversations: [] });
+        dispatch({ type: "SET_ACTIVE_CONVERSATION", id: null });
+        dispatch({ type: "SET_MESSAGES", messages: [] });
+      }
+    }
+  }, []);
+
   const selectCompanyAction = useCallback(async (id: string) => {
     disconnectGateway();
     dispatch({ type: "SET_ACTIVE_COMPANY", id });
@@ -536,58 +592,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const company = stateRef.current.companies.find((c) => c.id === id);
     if (company?.gatewayUrl && company?.gatewayToken && company?.runtimeType === "openclaw") {
       try {
-        const res = await fetch("/api/agents/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gatewayUrl: company.gatewayUrl, gatewayToken: company.gatewayToken }),
-        });
-        const data = await res.json();
-        if (data.agents && data.agents.length > 0) {
-          const existingAgents = (await getAgentsByCompany(id));
-          const existingIds = new Set(existingAgents.map((a) => a.id));
-          for (const agentData of data.agents) {
-            if (!existingIds.has(agentData.id)) {
-              const agent: Agent = {
-                id: agentData.id,
-                companyId: id,
-                name: agentData.name || agentData.id,
-                description: "",
-                specialty: "general",
-                createdAt: Date.now(),
-              };
-              try {
-                await dbCreateAgent(agent);
-                dispatch({ type: "ADD_AGENT", agent });
-              } catch {
-                // Agent may already exist in another company, skip
-              }
-            }
-          }
-        } else {
-          // No agents from gateway — create a default agent with unique ID for this company
-          const existingAgents = (await getAgentsByCompany(id));
-          if (existingAgents.length === 0) {
-            const defaultAgent: Agent = {
-              id: `default-${id}`,
-              companyId: id,
-              name: "Default",
-              description: "",
-              specialty: "general",
-              createdAt: Date.now(),
-            };
-            try {
-              await dbCreateAgent(defaultAgent);
-              dispatch({ type: "ADD_AGENT", agent: defaultAgent });
-            } catch {
-              // skip
-            }
-          }
-        }
+        await syncCompanyAgentsWithGateway(company);
       } catch {
         // Sync failed silently
       }
     }
-  }, [disconnectGateway, connectGateway]);
+  }, [disconnectGateway, connectGateway, syncCompanyAgentsWithGateway]);
 
   const createAgentAction = useCallback(async (opts: {
     companyId: string;
@@ -935,38 +945,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (company.runtimeType !== "openclaw") return;
 
     try {
-      const res = await fetch("/api/agents/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          gatewayUrl: company.gatewayUrl,
-          gatewayToken: company.gatewayToken,
-        }),
-      });
-      const data = await res.json();
-      if (!data.agents) return;
-
-      const existingAgents = current.agents.filter((a) => a.companyId === company.id);
-      const existingIds = new Set(existingAgents.map((a) => a.id));
-
-      for (const agentData of data.agents) {
-        if (!existingIds.has(agentData.id)) {
-          const agent: Agent = {
-            id: agentData.id,
-            companyId: company.id,
-            name: agentData.name,
-            description: `OpenClaw agent: ${agentData.name}`,
-            specialty: "general" as AgentSpecialty,
-            createdAt: Date.now(),
-          };
-          await dbCreateAgent(agent);
-          dispatch({ type: "ADD_AGENT", agent });
-        }
-      }
+      await syncCompanyAgentsWithGateway(company);
     } catch {
       // Sync failed silently
     }
-  }, []);
+  }, [syncCompanyAgentsWithGateway]);
 
   const restartGatewayAction = useCallback(async () => {
     try {
@@ -1051,6 +1034,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ]);
         dispatch({ type: "SET_AGENTS", agents });
         dispatch({ type: "SET_TEAMS", teams });
+
+        const firstCompany = companies.find((c) => c.id === firstId);
+        if (firstCompany?.gatewayUrl && firstCompany?.gatewayToken && firstCompany.runtimeType === "openclaw") {
+          try {
+            await syncCompanyAgentsWithGateway(firstCompany);
+          } catch {
+            // Sync failed silently
+          }
+        }
       }
 
       dispatch({ type: "SET_INITIALIZED" });
@@ -1064,7 +1056,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         gatewayRef.current = null;
       }
     };
-  }, []);
+  }, [syncCompanyAgentsWithGateway]);
 
   // Connect gateway when company/config changes
   useEffect(() => {

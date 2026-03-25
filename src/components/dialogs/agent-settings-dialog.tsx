@@ -114,12 +114,14 @@ export function AgentSettingsDialog({
     try {
       const res = await fetch(`/api/workspace?agentId=${agent.id}`, { headers: gwHeaders });
       const data = await res.json();
-      if (data.files) {
+      if (!res.ok) {
+        setFileError(data.error || `Failed to load files: ${res.status}`);
+      } else if (data.files) {
         setWorkspaceFiles(data.files);
         setOriginalFiles(data.files);
       }
-    } catch {
-      setFileError("Failed to load files");
+    } catch (error) {
+      setFileError(`Failed to load files: ${error}`);
     } finally {
       setLoadingWorkspace(false);
     }
@@ -131,10 +133,14 @@ export function AgentSettingsDialog({
     try {
       const res = await fetch(`/api/workspace?agentId=${agent.id}&file=${activeFile}`, { headers: gwHeaders });
       const data = await res.json();
-      setWorkspaceFiles((prev) => ({ ...prev, [activeFile]: data.content || "" }));
-      setOriginalFiles((prev) => ({ ...prev, [activeFile]: data.content || "" }));
-    } catch {
-      setFileError("Failed to refresh file");
+      if (!res.ok) {
+        setFileError(data.error || `Failed to refresh file: ${res.status}`);
+      } else {
+        setWorkspaceFiles((prev) => ({ ...prev, [activeFile]: data.content || "" }));
+        setOriginalFiles((prev) => ({ ...prev, [activeFile]: data.content || "" }));
+      }
+    } catch (error) {
+      setFileError(`Failed to refresh file: ${error}`);
     } finally {
       setLoadingWorkspace(false);
     }

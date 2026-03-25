@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { gatewayRpcCall } from "@/lib/gateway-ws";
+import { parseWorkspaceFileRpcResult, parseWorkspaceWriteRpcResult } from "@/lib/workspace-files";
 
 const WORKSPACE_FILES = [
   "SOUL.md",
@@ -30,17 +31,30 @@ export async function GET(req: NextRequest) {
     if (!WORKSPACE_FILES.includes(file)) {
       return NextResponse.json({ error: "Invalid file" }, { status: 400 });
     }
-    const content = await readFile(gatewayUrl, gatewayToken, resolvedAgentId, file);
-    return NextResponse.json({ content });
+    const result = await readFile(gatewayUrl, gatewayToken, resolvedAgentId, file);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: 502 });
+    }
+    return NextResponse.json({ content: result.content });
   }
 
   // Read all files
   const files: Record<string, string> = {};
-  await Promise.all(
+  const results = await Promise.all(
     WORKSPACE_FILES.map(async (f) => {
-      files[f] = await readFile(gatewayUrl, gatewayToken, resolvedAgentId, f);
+      const result = await readFile(gatewayUrl, gatewayToken, resolvedAgentId, f);
+      return { file: f, result };
     })
   );
+
+  const firstFailure = results.find(({ result }) => !result.ok);
+  if (firstFailure) {
+    return NextResponse.json({ error: firstFailure.result.error }, { status: 502 });
+  }
+
+  for (const { file: fileName, result } of results) {
+    files[fileName] = result.content;
+  }
 
   return NextResponse.json({ files });
 }
@@ -61,13 +75,14 @@ export async function POST(req: NextRequest) {
   const resolvedAgentId = await resolveAgentId(gatewayUrl, gatewayToken, agentId || "main");
 
   try {
-    const result = await gatewayRpcCall(gatewayUrl, gatewayToken, "agents.files.set", {
+    const rpcResult = await gatewayRpcCall(gatewayUrl, gatewayToken, "agents.files.set", {
       agentId: resolvedAgentId,
       name: file,
       content,
     });
+    const result = parseWorkspaceWriteRpcResult(rpcResult);
     if (!result.ok) {
-      return NextResponse.json({ error: result.error?.message || "Failed to write" }, { status: 502 });
+      return NextResponse.json({ error: result.error }, { status: 502 });
     }
     return NextResponse.json({ ok: true });
   } catch (e) {
@@ -92,15 +107,11 @@ async function resolveAgentId(gatewayUrl: string, gatewayToken: string, agentId:
   return agentId;
 }
 
-async function readFile(gatewayUrl: string, gatewayToken: string, agentId: string, file: string): Promise<string> {
+async function readFile(gatewayUrl: string, gatewayToken: string, agentId: string, file: string): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
   try {
     const result = await gatewayRpcCall(gatewayUrl, gatewayToken, "agents.files.get", { agentId, name: file });
-    if (result.ok && result.payload) {
-      const fileData = result.payload.file as Record<string, unknown> | undefined;
-      return (fileData?.content as string) || (result.payload.content as string) || "";
-    }
-  } catch {
-    // ignore
+    return parseWorkspaceFileRpcResult(result);
+  } catch (error) {
+    return { ok: false, error: String(error) };
   }
-  return "";
 }
